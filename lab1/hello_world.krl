@@ -30,6 +30,6 @@ ruleset hello_world {
       pre {
         name = (event:attr("name") || "Monkey").klog("our passed in name: ")
       }
-      send_directive("say", {"something": name})
+      send_directive("say", {"something": "Hello" + name})
     }
   }
