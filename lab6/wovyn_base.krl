@@ -1,11 +1,11 @@
 ruleset wovyn_base {
     meta {
         use module sensor_profile
-        use module twilio_proxy
-          with
-              sid = meta:rulesetConfig{"sid"} 
-              authToken = meta:rulesetConfig{"authToken"}
-              twilioNumber = meta:rulesetConfig{"twilioNumber"}
+        // use module twilio_proxy
+        //   with
+        //       sid = meta:rulesetConfig{"sid"} 
+        //       authToken = meta:rulesetConfig{"authToken"}
+        //       twilioNumber = meta:rulesetConfig{"twilioNumber"}
     }
 
     rule process_heartbeat {
@@ -48,7 +48,7 @@ ruleset wovyn_base {
             Actual: #{actual}>>
             recipient = sensor_profile:sms_number()
         }
-        twilio_proxy:sendSMS(recipient, message)
-        // send_directive("Send SMS", event:attrs)
+        // twilio_proxy:sendSMS(recipient, message)
+        send_directive("Send SMS", event:attrs)
     }
 }
