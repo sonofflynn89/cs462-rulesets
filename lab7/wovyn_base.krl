@@ -1,11 +1,7 @@
 ruleset wovyn_base {
     meta {
         use module sensor_profile
-        // use module twilio_proxy
-        //   with
-        //       sid = meta:rulesetConfig{"sid"} 
-        //       authToken = meta:rulesetConfig{"authToken"}
-        //       twilioNumber = meta:rulesetConfig{"twilioNumber"}
+        use module io.picolabs.subscription alias subs
     }
 
     rule process_heartbeat {
@@ -19,7 +15,7 @@ ruleset wovyn_base {
         fired {
             raise wovyn event "new_temperature_reading"
                 attributes {
-                    "temperature" : event:attrs{"genericThing"}{"data"}{"temperature"}[0]{"temperatureF"},
+                    "temperature" : event:attrs{"genericThing"}{"data"}{"temperature"}[0]{"temperatureF"}.as("Number"),
                     "timestamp" : time:now()
                 }
         }
@@ -38,17 +34,27 @@ ruleset wovyn_base {
         }
     }
 
-    rule threshold_notification {
+    // rule threshold_notification {
+    rule notify_collections_of_violation {
         select when wovyn threshold_violation
-        pre {
-            actual = event:attrs{"temperature"}
-            threshold = sensor_profile:threshold()
-            message = <<Temperature threshold violation
-            Threshold: #{threshold}
-            Actual: #{actual}>>
-            recipient = sensor_profile:sms_number()
-        }
-        // twilio_proxy:sendSMS(recipient, message)
-        send_directive("Send SMS", event:attrs)
+        foreach subs:established("Tx_role", "collection") setting (sub)
+        event:send({
+            "eci":sub{"Tx"},
+            "eid":"notify_threshold_violation",             
+            "domain":"sensor",
+            "type":"threshold_violation",
+            "attrs": event:attrs
+        })
+        
+        // pre {
+        //     actual = event:attrs{"temperature"}
+        //     threshold = sensor_profile:threshold()
+        //     message = <<Temperature threshold violation
+        //     Threshold: #{threshold}
+        //     Actual: #{actual}>>
+        //     recipient = sensor_profile:sms_number()
+        // }
+        // // twilio_proxy:sendSMS(recipient, message)
+        // send_directive("Send SMS", event:attrs)
     }
 }
