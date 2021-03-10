@@ -160,11 +160,12 @@ ruleset manage_sensors {
                     "domain": "wrangler", "type": "subscription",
                     "attrs": {
                         "wellKnown_Tx": subs:wellKnown_Rx(){"id"},
-                        "Tx_role": "collection", 
+                        "Tx_role": "collection",
+                        "Tx_host": "http://366a94bb8c21.ngrok.io",
                         "Rx_role": their_role,
+                        "Rx_host": their_host,
                         "name": "collection-" + sensor_name,
-                        "channel_type": "subscription",
-                        "Tx_host": "http://24fd8516f276.ngrok.io"
+                        "channel_type": "subscription",     
                     }
                 }, their_host)
             }
