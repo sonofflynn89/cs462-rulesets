@@ -2,32 +2,99 @@ ruleset manage_sensors {
     meta {
         use module io.picolabs.wrangler alias wrangler
         use module io.picolabs.subscription alias subs
-        shares sensors, all_temperatures, sensor_profiles
-        provides sensors, all_temperatures, sensor_profiles
+        shares sensors, temp_reports, next_report_id, recent_temp_reports
+        provides sensors, temp_reports, next_report_id, recent_temp_reports
     }
 
     global {
         sensors = function() {
             ent:sensors || {}
         }
-        all_temperatures = function() {
-            subs:established("Tx_role", "temp_sensor").map(function(sub_info) {
-                wrangler:picoQuery(
-                    sub_info{"Tx"}, // ECI
-                    "temperature_store", // Ruleset
-                    "temperatures", // Function
-                    null, // Params
-                    sub_info{"Tx_host"} // Host of Pico
-                )
-            })
+
+        recent_temp_reports = function() {
+            ent:temp_reports.keys().filter(
+                function(report_id) { ent:next_report_id - report_id <= 5 }
+            ).map(
+                function(report_id) {
+                    {"report_id": report_id}.put(ent:temp_reports{report_id})
+                }
+            ).reverse()
         }
-        //////////////////////////
-        // Testing Function Only
-        //////////////////////////
-        sensor_profiles = function() {
-            ent:sensors.map(function(sensor_vals, sensor_name) {
-                ctx:query(sensor_vals{"eci"}, "sensor_profile", "profile")
-            })
+
+        // Extra Stuff
+        temp_reports = function() {
+            ent:temp_reports
+        }
+        next_report_id = function() {
+            ent:next_report_id
+        }
+    }
+
+    ////////////////////////////
+    // Temperature Reports
+    ////////////////////////////
+
+    rule init {
+        select when wrangler ruleset_installed
+          where event:attrs{"rid"} == meta:rid || event:attrs{"rids"} >< meta:rid
+        send_directive("Initializing Sensor Manager")
+        always {
+            ent:next_report_id := 0
+            ent:temp_reports := {}
+            ent:sensors := {}
+        }
+    }
+
+    rule send_temp_report_requests {
+        select when sensor temp_report_requested
+            foreach subs:established("Tx_role", "temp_sensor") setting (sub_info)
+                event:send(
+                    { 
+                        "eci": sub_info{"Tx"}, 
+                        "domain": "sensor", "type": "temperature_requested",
+                        "attrs": {
+                            "requester": sub_info{"Rx"},
+                            "report_id": ent:next_report_id
+                        }
+                    }
+                )
+            fired {
+                ent:temp_reports{ent:next_report_id} := {
+                    "temperature_sensors": subs:established("Tx_role", "temp_sensor").length(),
+                    "responding": 0,
+                    "temperatures": []
+                } on final
+                ent:next_report_id := ent:next_report_id + 1 on final
+            }
+    }
+
+    rule collect_temp_report_readings {
+        select when sensor temperature_sent
+        pre {
+            report_id = event:attrs{"report_id"}
+            num_responding_sensors = ent:temp_reports{[report_id, "responding"]}
+            current_temperatures = ent:temp_reports{[report_id, "temperatures"]}
+            new_temperature = event:attrs{"temperature"}
+        }
+        send_directive("Temperature received for report " + report_id)
+        always {
+            ent:temp_reports{[report_id, "responding"]} := num_responding_sensors + 1
+            ent:temp_reports{[report_id, "temperatures"]} := current_temperatures.append(new_temperature)
+            raise sensor event "report_updated" attributes { "report_id": report_id }
+        }        
+    }
+
+    rule update_report_status {
+        select when sensor report_updated
+        pre {
+            report_id = event:attrs{"report_id"}
+            num_responding_sensors = ent:temp_reports{[report_id, "responding"]}
+            num_total_sensors = ent:temp_reports{[report_id, "temperature_sensors"]}
+        }
+        if num_total_sensors == num_responding_sensors then
+            send_directive("Report " + report_id + " complete")
+        fired {
+            raise sensor event "report_complete" attributes event:attrs
         }
     }
 
@@ -74,7 +141,7 @@ ruleset manage_sensors {
                         "eid": "install-ruleset",
                         "domain": "wrangler", "type": "install_ruleset_request",
                         "attrs": {
-                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab7/sensor_profile.krl",
+                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab8/sensor_profile.krl",
                             "rid": "sensor_profile",
                             "config": {},
                             "sensor_name": sensor_name
@@ -87,7 +154,7 @@ ruleset manage_sensors {
                         "eid": "install-ruleset",
                         "domain": "wrangler", "type": "install_ruleset_request",
                         "attrs": {
-                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab7/temperature_store.krl",
+                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab8/temperature_store.krl",
                             "rid": "temperature_store",
                             "config": {},
                         }
@@ -99,7 +166,7 @@ ruleset manage_sensors {
                         "eid": "install-ruleset",
                         "domain": "wrangler", "type": "install_ruleset_request",
                         "attrs": {
-                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab7/wovyn_base.krl",
+                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab8/wovyn_base.krl",
                             "rid": "wovyn_base",
                             "config": {},
                         }
@@ -161,7 +228,6 @@ ruleset manage_sensors {
                     "attrs": {
                         "wellKnown_Tx": subs:wellKnown_Rx(){"id"},
                         "Tx_role": "collection",
-                        "Tx_host": "http://366a94bb8c21.ngrok.io",
                         "Rx_role": their_role,
                         "Rx_host": their_host,
                         "name": "collection-" + sensor_name,

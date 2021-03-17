@@ -22,7 +22,34 @@ ruleset temperature_store {
             }).reverse()
         }
     }
+
+    /////////////////////////
+    // Temperature Report
+    /////////////////////////
+
+    rule send_temperature {
+        select when sensor temperature_requested
+        pre {
+            report_id = event:attrs{"report_id"}
+            temperature = temperatures().head()
+        }
+        event:send(
+            { 
+                "eci": event:attrs{"requester"}, 
+                "domain": "sensor", "type": "temperature_sent",
+                "attrs": {
+                    "temperature": temperature,
+                    "report_id": report_id
+                }
+            }
+        )
+        
+
+    }
    
+    //////////////////////////
+    // Previous Work
+    //////////////////////////
     rule collect_temperatures {
         select when wovyn new_temperature_reading
         send_directive("Temperature Collected", event:attrs)
