@@ -27,6 +27,24 @@ ruleset manage_sensors {
         }
     }
 
+    /////////////////////////////
+    // Cleanup Code
+    /////////////////////////////
+
+    rule clear_all_state {
+        select when gossip complete_reset_requested
+            foreach ent:sensors.keys() setting (child_name)
+                event:send({ 
+                    "eci": ent:sensors{[child_name, "eci"]}, 
+                    "domain": "gossip", "type": "reset_requested",
+                    "attrs": {}
+                })
+    }
+
+    /////////////////////////////
+    // Original Code
+    ////////////////////////////
+
     rule initialize_sensors {
         select when sensor needs_initialization
         always {
@@ -105,6 +123,18 @@ ruleset manage_sensors {
                         "attrs": {
                             "absoluteURL": "https://raw.githubusercontent.com/windley/temperature-network/main/io.picolabs.wovyn.emitter.krl",
                             "rid": "io.picolabs.wovyn.emitter",
+                            "config": {},
+                        }
+                    }
+                )
+                event:send(
+                    { 
+                        "eci": sensor{"eci"}, 
+                        "eid": "install-ruleset",
+                        "domain": "wrangler", "type": "install_ruleset_request",
+                        "attrs": {
+                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab9/gossip.krl",
+                            "rid": "gossip",
                             "config": {},
                         }
                     }
