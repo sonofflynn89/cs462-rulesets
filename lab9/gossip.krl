@@ -1,12 +1,13 @@
 ruleset gossip {
     meta {
         use module io.picolabs.subscription alias subs
+        use module temperature_store
         shares health_check
         provides health_check
     }
 
     global {
-        default_interval = 180 // 3 minutes
+        default_interval = 30 // 3 minutes
         health_check = function() {
             {
                 "gossip_id": ent:gossip_id,
@@ -14,7 +15,7 @@ ruleset gossip {
                 "logs": ent:temperature_logs,
                 "summaries": ent:peer_summaries,
                 "interval": ent:gossip_interval,
-                "wellKnown_to_gossip_id": ent:wellKnown_to_gossip_id,
+                "sub_to_gossip": ent:sub_to_gossip,
                 "my_wellKnown": subs:wellKnown_Rx(){"id"}
             }
         }
@@ -48,8 +49,9 @@ ruleset gossip {
             ent:sequence_number := 0
             ent:temperature_logs := {}
             ent:peer_summaries := {}
-            ent:wellKnown_to_gossip_id := {}
+            ent:sub_to_gossip := {}
             ent:gossip_interval := default_interval
+            schedule gossip event "heartbeat" at time:add(time:now(), {"seconds": ent:gossip_interval})
         }
     }
 
@@ -66,7 +68,13 @@ ruleset gossip {
 
     rule start_gossip {
         select when gossip heartbeat
+        pre {
+           
+        }
         send_directive("Heartbeat Received")
+        fired {
+            schedule gossip event "heartbeat" at time:add(time:now(), {"seconds": ent:gossip_interval})
+        }
     }
 
     rule process_rumor {
@@ -111,34 +119,32 @@ ruleset gossip {
     rule auto_accept {
         select when wrangler inbound_pending_subscription_added
         pre {
-          test = event:attrs.klog("WAT????")
           my_role = event:attrs{"Rx_role"}
           their_role = event:attrs{"Tx_role"}
-          their_wellKnown = event:attrs{"Tx"}
           their_gossip_id = event:attrs{"tx_gossip_id"}
+          sub_id = event:attrs{"Id"}
         }
         if my_role=="node" && their_role=="node" && their_gossip_id then
             send_directive("Subscription Request for "+ their_gossip_id + " approved")
         fired {
-            ent:wellKnown_to_gossip_id{their_wellKnown} := their_gossip_id
             raise wrangler event "pending_subscription_approval"
                 attributes event:attrs
+            ent:sub_to_gossip{sub_id} := their_gossip_id
         } else {
             raise wrangler event "inbound_rejection"
                 attributes event:attrs
         }
     }
 
-    rule record_subscription {
+    rule record_successful_subscription {
         select when wrangler outbound_pending_subscription_approved
         pre {
-           test = event:attrs.klog("OUTBOUND approved")
            their_gossip_id = event:attrs{"rx_gossip_id"}
-           their_wellKnown = event:attrs{"Rx"}
+           sub_id = event:attrs{"Id"}
         }
         send_directive("Subscription Request for "+ their_gossip_id + " approved")
         always {
-            ent:wellKnown_to_gossip_id{their_wellKnown} := their_gossip_id
+            ent:sub_to_gossip{sub_id} := their_gossip_id
         }
     }
 }
