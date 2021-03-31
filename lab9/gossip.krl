@@ -9,6 +9,10 @@ ruleset gossip {
 
     global {
         default_interval = 60 // 3 minutes
+        
+        //////////////////////
+        // Debug Functions
+        //////////////////////
         health_check = function() {
             {
                 "gossip_id": ent:gossip_id,
@@ -21,6 +25,9 @@ ruleset gossip {
             }
         }
         
+        ///////////////////////
+        // Gossip Functions
+        ///////////////////////
         temperature_synced = function() {
             current_temp = temperature_store:temperatures().head()
 
@@ -109,6 +116,286 @@ ruleset gossip {
         }
     }
 
+    /////////////////////////////////////////////////
+    // Gossip Part 1: Check if self has new reading
+    /////////////////////////////////////////////////
+
+    rule respond_to_heartbeat {
+        select when gossip heartbeat
+        pre {
+            synced = temperature_synced()
+        }
+        if synced then
+            every {
+                send_directive("Starting Gossip Round")
+            }
+        fired {
+            raise gossip event "start_round_requested"
+        } else {
+            raise gossip event "new_self_reading"
+        } finally {
+            schedule gossip event "heartbeat" at time:add(time:now(), {"seconds": ent:gossip_interval})
+        }
+    }
+
+    rule send_new_self_reading {
+        select when gossip new_self_reading
+        pre {
+            new_temp = temperature_store:temperatures().head()
+            message = {
+                "MessageID": ent:gossip_id + ":" + ent:sequence_number,
+                "SensorID": ent:gossip_id,
+                "Temperature": new_temp{"temperature"},
+                "Timestamp": new_temp{"timestamp"}
+            }
+        }
+        send_directive("New reading detected")
+        always {
+            raise gossip event "rumor" attributes message
+            ent:sequence_number := ent:sequence_number + 1
+            ent:last_temp := new_temp
+        }
+    }
+
+    /////////////////////////////////////////////////
+    // Gossip Part 2: Decide Message Type
+    /////////////////////////////////////////////////
+
+    rule start_gossip_round {
+        select when gossip start_round_requested
+        pre {
+            message_type = random:integer(1) > 0 => "rumor" | "seen"
+        }
+        if message_type == "rumor" then
+            send_directive("Rumor Round Selected")
+        fired {
+            raise gossip event "rumor_round_requested"
+        } else {
+            raise gossip event "seen_round_requested"
+        }
+    }
+
+    /////////////////////////////////////////////////
+    // Gossip Part 3: Select Peer and Send Message
+    /////////////////////////////////////////////////
+
+    rule start_rumor_round {
+        select when gossip rumor_round_requested
+        pre {
+            peer = peer_in_most_need()
+            gossip_id = peer => ent:sub_to_gossip{peer{"Id"}} | null
+            message = peer => first_needed_message(gossip_id) | null
+            message_number = peer => extract_message_number(message{"MessageID"}) | null
+            message_origin = peer => message{"SensorID"} | null
+        }
+        if peer then
+            every {
+                send_directive("Rumor Message Selected for peer " + gossip_id, message)
+                event:send({
+                    "eci": peer{"Tx"},
+                    "domain": "gossip", "type": "rumor",
+                    "attrs": message
+                })
+            }
+        fired {
+            ent:peer_summaries{gossip_id} := ent:peer_summaries{gossip_id}.put([message_origin], message_number)
+        }
+    }
+
+    rule start_seen_round {
+        select when gossip seen_round_requested
+        send_directive("Seen Round Starting..")
+    }
+
+    /////////////////////////////////
+    // Rumors from Peers
+    /////////////////////////////////
+
+    rule process_rumor {
+        select when gossip rumor
+        pre {
+            message_id = event:attrs{"MessageID"}
+            gossip_id = event:attrs{"SensorID"}
+            message_needed = ent:temperature_logs{[gossip_id, message_id]} == null
+        }
+        if message_needed then
+            send_directive("Needed Rumor Messaged Received")
+        fired {
+            raise gossip event "needed_rumor_received" attributes event:attrs
+        }
+    }
+
+    rule determine_rumor_origin {
+        select when gossip needed_rumor_received
+        pre {
+            gossip_id = event:attrs{"SensorID"}
+            is_new_origin = ent:temperature_logs{gossip_id} == null
+        }
+        if is_new_origin then
+            send_directive("New origin detected: " + gossip_id)
+        fired {
+            raise gossip event "rumor_from_new_origin_received" attributes event:attrs
+        } else {
+            raise gossip event "rumor_from_known_origin_received" attributes event:attrs
+        }
+    }
+
+    rule process_rumor_from_known_origin {
+        select when gossip rumor_from_known_origin_received
+        pre {
+            message_id = event:attrs{"MessageID"}
+            gossip_id = event:attrs{"SensorID"}
+
+            message_number = extract_message_number(message_id)
+            highest_message_number = ent:peer_summaries{[ent:gossip_id, gossip_id]}
+            updated_summary_number = 
+                message_number == highest_message_number + 1 => 
+                    message_number | 
+                    highest_message_number
+            
+            self_summary = ent:peer_summaries{ent:gossip_id}
+
+        }
+        send_directive("Rumor Received from known origin with message_id " + message_id)
+        fired {
+            ent:temperature_logs{[gossip_id, message_id]} := event:attrs
+            ent:peer_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+        }
+    }
+
+    rule process_rumor_from_new_origin {
+        select when gossip rumor_from_new_origin_received
+        pre {
+            message_id = event:attrs{"MessageID"}
+            gossip_id = event:attrs{"SensorID"}
+
+            message_number = extract_message_number(message_id)
+            updated_summary_number = 
+                message_number == 0 =>
+                    message_number |
+                    -1
+            self_summary = ent:peer_summaries{ent:gossip_id}
+
+        }
+        send_directive("Rumor Received from known origin with message_id " + message_id)
+        fired {
+            ent:temperature_logs{gossip_id} := {}
+            ent:peer_summaries{gossip_id} := {}
+
+            ent:temperature_logs{[gossip_id, message_id]} := event:attrs
+            ent:peer_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+        }
+    }
+
+    // rule process_rumor {
+    //     select when gossip rumor
+    //     pre {
+    //         message_id = event:attrs{"MessageID"}
+    //         gossip_id = event:attrs{"SensorID"}
+    //         message_needed = ent:temperature_logs{[gossip_id, message_id]} == null
+
+    //         message_number = extract_message_number(message_id)
+    //         highest_message_number = ent:peer_summaries{[ent:gossip_id, gossip_id]}
+    //         updated_summary_number = 
+    //             message_number == highest_message_number + 1 => 
+    //                 message_number | 
+    //                 highest_message_number
+            
+    //         self_summary = ent:peer_summaries{ent:gossip_id}
+
+    //     }
+    //     if message_needed then
+    //         send_directive("Rumor Received with message_id " + message_id)
+    //     fired {
+    //         ent:temperature_logs{[gossip_id, message_id]} := event:attrs
+    //         ent:peer_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+    //     }
+    // }
+
+    rule process_seen {
+        select when gossip seen 
+        send_directive("Seen Received")
+        /**
+            The rule for responding to seen events should check for any 
+            rumors the pico knows about that are not in the seen message 
+            and send them (as rumors) to the pico that sent the seen event.  
+            Note that how this is done affects the amount of time it takes 
+            for the network to reach consistency. For example, you could 
+            just send one needed piece of information (the stingy algorithm) 
+            or all of the needed information. 
+        */
+    }
+
+    /////////////////////////////////
+    // Subscription Management
+    /////////////////////////////////
+
+    rule add_peer {
+        select when gossip peer_connection_requested
+        pre {
+            wellKnown_eci = event:attrs{"wellKnown_eci"}
+            gossip_id = event:attrs{"gossip_id"}
+        }
+        if wellKnown_eci && gossip_id then
+            every {
+                send_directive("Peer to be added")
+                event:send({
+                    "eci": wellKnown_eci,
+                    "domain": "wrangler", "type": "subscription",
+                    "attrs": {
+                        "wellKnown_Tx": subs:wellKnown_Rx(){"id"},
+                        "Tx_role": "node",
+                        "rx_gossip_id": ent:gossip_id, 
+                        "Rx_role": "node",
+                        "tx_gossip_id": gossip_id,
+                        "name": ent:gossip_id + ":" + gossip_id,
+                        "channel_type": "subscription",
+                    }
+                })
+            }
+    }
+
+    rule auto_accept {
+        select when wrangler inbound_pending_subscription_added
+        pre {
+          my_role = event:attrs{"Rx_role"}
+          their_role = event:attrs{"Tx_role"}
+          their_gossip_id = event:attrs{"tx_gossip_id"}
+          sub_id = event:attrs{"Id"}
+        }
+        if my_role=="node" && their_role=="node" && their_gossip_id then
+            send_directive("Subscription Request for "+ their_gossip_id + " approved")
+        fired {
+            raise wrangler event "pending_subscription_approval"
+                attributes event:attrs
+            ent:sub_to_gossip{sub_id} := their_gossip_id
+            ent:temperature_logs{their_gossip_id} := {}
+            ent:peer_summaries{ent:gossip_id} := ent:peer_summaries{ent:gossip_id}.put([their_gossip_id], -1)
+            ent:peer_summaries{their_gossip_id} := {}
+        } else {
+            raise wrangler event "inbound_rejection"
+                attributes event:attrs
+        }
+    }
+
+    rule record_successful_subscription {
+        select when wrangler outbound_pending_subscription_approved
+        pre {
+           their_gossip_id = event:attrs{"rx_gossip_id"}
+           sub_id = event:attrs{"Id"}
+        }
+        send_directive("Subscription Request for "+ their_gossip_id + " approved")
+        always {
+            ent:sub_to_gossip{sub_id} := their_gossip_id
+            ent:temperature_logs{their_gossip_id} := {}
+            ent:peer_summaries{ent:gossip_id} := ent:peer_summaries{ent:gossip_id}.put([their_gossip_id], -1)
+            ent:peer_summaries{their_gossip_id} := {}
+        }
+    }
+
+    ///////////////////////////
+    // State Control 
+    ///////////////////////////
     rule init {
         select when wrangler ruleset_installed
           where event:attrs{"rid"} == meta:rid || event:attrs{"rids"} >< meta:rid
@@ -171,191 +458,6 @@ ruleset gossip {
         send_directive("Heartbeat Restarted for " + ent:gossip_id)
         always {
             schedule gossip event "heartbeat" at time:add(time:now(), {"seconds": ent:gossip_interval})
-        }
-    }
-
-    rule respond_to_heartbeat {
-        select when gossip heartbeat
-        pre {
-            synced = temperature_synced()
-        }
-        if synced then
-            every {
-                send_directive("Starting Gossip Round")
-            }
-        fired {
-            raise gossip event "start_round_requested"
-        } else {
-            raise gossip event "new_self_reading"
-        } finally {
-            schedule gossip event "heartbeat" at time:add(time:now(), {"seconds": ent:gossip_interval})
-        }
-    }
-
-    rule start_gossip_round {
-        select when gossip start_round_requested
-        pre {
-            message_type = random:integer(1) > 0 => "rumor" | "seen"
-        }
-        if message_type == "rumor" then
-            send_directive("Rumor Round Selected")
-        fired {
-            raise gossip event "rumor_round_requested"
-        } else {
-            raise gossip event "seen_round_requested"
-        }
-    }
-
-    rule start_rumor_round {
-        select when gossip rumor_round_requested
-        pre {
-            peer = peer_in_most_need()
-            gossip_id = peer => ent:sub_to_gossip{peer{"Id"}} | null
-            message = peer => first_needed_message(gossip_id) | null
-            message_number = peer => extract_message_number(message{"MessageID"}) | null
-            message_origin = peer => message{"SensorID"} | null
-        }
-        if peer then
-            every {
-                send_directive("Rumor Message Selected for peer " + gossip_id, message)
-                event:send({
-                    "eci": peer{"Tx"},
-                    "domain": "gossip", "type": "rumor",
-                    "attrs": message
-                })
-            }
-        fired {
-            ent:peer_summaries{gossip_id} := ent:peer_summaries{gossip_id}.put([message_origin], message_number)
-        }
-    }
-
-    rule start_seen_round {
-        select when gossip seen_round_requested
-        send_directive("Seen Round Starting..")
-    }
-
-    rule send_new_self_reading {
-        select when gossip new_self_reading
-        pre {
-            new_temp = temperature_store:temperatures().head()
-            message = {
-                "MessageID": ent:gossip_id + ":" + ent:sequence_number,
-                "SensorID": ent:gossip_id,
-                "Temperature": new_temp{"temperature"},
-                "Timestamp": new_temp{"timestamp"}
-            }
-        }
-        send_directive("New reading detected")
-        always {
-            raise gossip event "rumor" attributes message
-            ent:sequence_number := ent:sequence_number + 1
-            ent:last_temp := new_temp
-        }
-    }
-
-    rule process_rumor {
-        select when gossip rumor
-        pre {
-            message_id = event:attrs{"MessageID"}
-            gossip_id = event:attrs{"SensorID"}
-            message_needed = ent:temperature_logs{[gossip_id, message_id]} == null
-
-            message_number = extract_message_number(message_id)
-            highest_message_number = ent:peer_summaries{[ent:gossip_id, gossip_id]}
-            updated_summary_number = 
-                message_number == highest_message_number + 1 => 
-                    message_number | 
-                    highest_message_number
-            
-            self_summary = ent:peer_summaries{ent:gossip_id}
-
-        }
-        if message_needed then
-            send_directive("Rumor Received with message_id " + message_id)
-        fired {
-            ent:temperature_logs{[gossip_id, message_id]} := event:attrs
-            ent:peer_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
-        }
-    }
-
-    rule process_seen {
-        select when gossip seen 
-        send_directive("Seen Received")
-        /**
-            The rule for responding to seen events should check for any 
-            rumors the pico knows about that are not in the seen message 
-            and send them (as rumors) to the pico that sent the seen event.  
-            Note that how this is done affects the amount of time it takes 
-            for the network to reach consistency. For example, you could 
-            just send one needed piece of information (the stingy algorithm) 
-            or all of the needed information. 
-        */
-    }
-
-    ////////////////////////////
-    // Subscriptions
-    ////////////////////////////
-
-    rule add_peer {
-        select when gossip peer_connection_requested
-        pre {
-            wellKnown_eci = event:attrs{"wellKnown_eci"}
-            gossip_id = event:attrs{"gossip_id"}
-        }
-        if wellKnown_eci && gossip_id then
-            every {
-                send_directive("Peer to be added")
-                event:send({
-                    "eci": wellKnown_eci,
-                    "domain": "wrangler", "type": "subscription",
-                    "attrs": {
-                        "wellKnown_Tx": subs:wellKnown_Rx(){"id"},
-                        "Tx_role": "node",
-                        "rx_gossip_id": ent:gossip_id, 
-                        "Rx_role": "node",
-                        "tx_gossip_id": gossip_id,
-                        "name": ent:gossip_id + ":" + gossip_id,
-                        "channel_type": "subscription",
-                    }
-                })
-            }
-    }
-
-    rule auto_accept {
-        select when wrangler inbound_pending_subscription_added
-        pre {
-          my_role = event:attrs{"Rx_role"}
-          their_role = event:attrs{"Tx_role"}
-          their_gossip_id = event:attrs{"tx_gossip_id"}
-          sub_id = event:attrs{"Id"}
-        }
-        if my_role=="node" && their_role=="node" && their_gossip_id then
-            send_directive("Subscription Request for "+ their_gossip_id + " approved")
-        fired {
-            raise wrangler event "pending_subscription_approval"
-                attributes event:attrs
-            ent:sub_to_gossip{sub_id} := their_gossip_id
-            ent:temperature_logs{their_gossip_id} := {}
-            ent:peer_summaries{ent:gossip_id} := ent:peer_summaries{ent:gossip_id}.put([their_gossip_id], -1)
-            ent:peer_summaries{their_gossip_id} := {}
-        } else {
-            raise wrangler event "inbound_rejection"
-                attributes event:attrs
-        }
-    }
-
-    rule record_successful_subscription {
-        select when wrangler outbound_pending_subscription_approved
-        pre {
-           their_gossip_id = event:attrs{"rx_gossip_id"}
-           sub_id = event:attrs{"Id"}
-        }
-        send_directive("Subscription Request for "+ their_gossip_id + " approved")
-        always {
-            ent:sub_to_gossip{sub_id} := their_gossip_id
-            ent:temperature_logs{their_gossip_id} := {}
-            ent:peer_summaries{ent:gossip_id} := ent:peer_summaries{ent:gossip_id}.put([their_gossip_id], -1)
-            ent:peer_summaries{their_gossip_id} := {}
         }
     }
 }
