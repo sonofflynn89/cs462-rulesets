@@ -2,8 +2,8 @@ ruleset gossip {
     meta {
         use module io.picolabs.subscription alias subs
         use module temperature_store
-        shares health_check, peer_in_most_need, first_needed_message
-        provides health_check,  peer_in_most_need, first_needed_message
+        shares health_check, peer_in_most_need, first_needed_message, get_unseen_messages
+        provides health_check,  peer_in_most_need, first_needed_message, get_unseen_messages
         
     }
 
@@ -114,6 +114,28 @@ ruleset gossip {
             
             missing_messages.head()
         }
+
+        get_unseen_messages = function(peer_summary) {
+            ent:temperature_logs.values()
+                // Combine all messages into one array
+                .reduce(function(acc, log_section) {
+                    acc.append(log_section.values())
+                }, [])
+                .filter(function(message){
+                    gossip_id = message{"SensorID"}
+                    message_id = message{"MessageID"}
+                    message_number = extract_message_number(message{"MessageID"})
+                    highest_peer_number = 
+                        peer_summary{gossip_id} == null => 
+                            -1 | 
+                            peer_summary{gossip_id}
+
+                    unknown_origin = peer_summary{gossip_id} == null
+                    unseen_message = message_number > highest_peer_number
+
+                    unknown_origin || unseen_message
+                })
+        }
     }
 
     /////////////////////////////////////////////////
@@ -204,7 +226,24 @@ ruleset gossip {
 
     rule start_seen_round {
         select when gossip seen_round_requested
-        send_directive("Seen Round Starting..")
+        pre {
+            num_peers = subs:established().length() || 1
+            peer_index = random:integer(num_peers - 1)
+            chosen_peer = subs:established().slice(peer_index, peer_index).head() 
+        }
+        if chosen_peer then 
+            every {
+                send_directive("Seen Round Starting", chosen_peer)
+                event:send({
+                    "eci": chosen_peer{"Tx"},
+                    "domain": "gossip", "type": "seen",
+                    "attrs": {
+                        "gossip_id": ent:gossip_id,
+                        "summary": ent:peer_summary{ent:gossip_id},
+                        "eci": chosen_peer{"Rx"}
+                    }
+                })
+            }
     }
 
     /////////////////////////////////
@@ -287,34 +326,30 @@ ruleset gossip {
         }
     }
 
-    // rule process_rumor {
-    //     select when gossip rumor
-    //     pre {
-    //         message_id = event:attrs{"MessageID"}
-    //         gossip_id = event:attrs{"SensorID"}
-    //         message_needed = ent:temperature_logs{[gossip_id, message_id]} == null
-
-    //         message_number = extract_message_number(message_id)
-    //         highest_message_number = ent:peer_summaries{[ent:gossip_id, gossip_id]}
-    //         updated_summary_number = 
-    //             message_number == highest_message_number + 1 => 
-    //                 message_number | 
-    //                 highest_message_number
-            
-    //         self_summary = ent:peer_summaries{ent:gossip_id}
-
-    //     }
-    //     if message_needed then
-    //         send_directive("Rumor Received with message_id " + message_id)
-    //     fired {
-    //         ent:temperature_logs{[gossip_id, message_id]} := event:attrs
-    //         ent:peer_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
-    //     }
-    // }
+    ///////////////////////////////////////
+    // Seen from Peers
+    ///////////////////////////////////////
 
     rule process_seen {
-        select when gossip seen 
-        send_directive("Seen Received")
+        select when gossip seen
+            foreach get_unseen_messages(event:attrs{"summary"}) setting (unseen_message)
+                pre {
+                    destination = event:attrs{"eci"}
+                    gossip_id = event:attrs{"gossip_id"}    
+                }
+                every {
+                    send_directive("Sending Message")
+                    event:send({
+                        "eci": destination,
+                        "domain": "gossip", "type": "rumor",
+                        "attrs": unseen_message
+                    })
+                }
+                always {
+                    ent:peer_summary{gossip_id} := event:attrs{"summary"} on final 
+                }
+
+
         /**
             The rule for responding to seen events should check for any 
             rumors the pico knows about that are not in the seen message 
