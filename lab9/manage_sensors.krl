@@ -41,6 +41,26 @@ ruleset manage_sensors {
                 })
     }
 
+    rule stop_all_heartbeats {
+        select when gossip all_stop_requested
+            foreach ent:sensors.keys() setting (child_name)
+                event:send({ 
+                    "eci": ent:sensors{[child_name, "eci"]}, 
+                    "domain": "gossip", "type": "stop_requested",
+                    "attrs": {}
+                })
+    }
+
+    rule restart_all_heartbeats {
+        select when gossip all_restart_requested
+            foreach ent:sensors.keys() setting (child_name)
+                event:send({ 
+                    "eci": ent:sensors{[child_name, "eci"]}, 
+                    "domain": "gossip", "type": "restart_requested",
+                    "attrs": {}
+                })
+    }
+
     /////////////////////////////
     // Original Code
     ////////////////////////////
