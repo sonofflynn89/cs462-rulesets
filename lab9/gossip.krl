@@ -2,13 +2,13 @@ ruleset gossip {
     meta {
         use module io.picolabs.subscription alias subs
         use module temperature_store
-        shares health_check, peer_in_most_need, first_needed_message, get_unseen_messages
-        provides health_check,  peer_in_most_need, first_needed_message, get_unseen_messages
+        shares health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
+        provides health_check,  peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
         
     }
 
     global {
-        default_interval = 60 // 3 minutes
+        default_interval = 20 // 20 seconds
         
         //////////////////////
         // Debug Functions
@@ -44,7 +44,7 @@ ruleset gossip {
         scheduled_heartbeats = function() {
             schedule:list().filter(function(e) {
                 e{["event", "domain"]} == "gossip" && 
-                e{["event", "type"]} == "heartbeat"
+                e{["event", "name"]} == "heartbeat"
             })
         }
 
@@ -152,11 +152,11 @@ ruleset gossip {
                 send_directive("Starting Gossip Round")
             }
         fired {
+            schedule gossip event "heartbeat" at time:add(time:now(), {"seconds": ent:gossip_interval})
             raise gossip event "start_round_requested"
         } else {
-            raise gossip event "new_self_reading"
-        } finally {
             schedule gossip event "heartbeat" at time:add(time:now(), {"seconds": ent:gossip_interval})
+            raise gossip event "new_self_reading"
         }
     }
 

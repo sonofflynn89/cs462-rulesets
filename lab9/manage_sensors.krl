@@ -14,7 +14,7 @@ ruleset manage_sensors {
                 ctx:query(sensor_vals{"eci"}, "temperature_store", "temperatures")
             })
         }
-        default_threshold = 70
+        default_threshold = 90
         sms_number = "+19519708437"
 
         //////////////////////////
@@ -58,6 +58,21 @@ ruleset manage_sensors {
                     "eci": ent:sensors{[child_name, "eci"]}, 
                     "domain": "gossip", "type": "restart_requested",
                     "attrs": {}
+                })
+    }
+
+    rule change_all_intervals {
+        select when gossip all_interval_change_requested
+            foreach ent:sensors.keys() setting (child_name)
+                pre {
+                    new_interval = event:attrs{"new_interval"}.as("Number")
+                }
+                event:send({ 
+                    "eci": ent:sensors{[child_name, "eci"]}, 
+                    "domain": "gossip", "type": "interval_modified",
+                    "attrs": {
+                        "interval": new_interval
+                    }
                 })
     }
 
