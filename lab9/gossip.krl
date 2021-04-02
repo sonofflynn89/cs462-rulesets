@@ -15,13 +15,13 @@ ruleset gossip {
         //////////////////////
         health_check = function() {
             {
+                "my_wellKnown": subs:wellKnown_Rx(){"id"},
                 "gossip_id": ent:gossip_id,
-                "sequence": ent:sequence_number,
-                "logs": ent:temperature_logs,
-                "summaries": ent:peer_summaries,
                 "interval": ent:gossip_interval,
+                "sequence": ent:sequence_number,
                 "sub_to_gossip": ent:sub_to_gossip,
-                "my_wellKnown": subs:wellKnown_Rx(){"id"}
+                "summaries": ent:peer_summaries,
+                "logs": ent:temperature_logs,
             }
         }
         
@@ -258,7 +258,7 @@ ruleset gossip {
             gossip_id = event:attrs{"SensorID"}
             message_needed = ent:temperature_logs{[gossip_id, message_id]} == null
         }
-        if message_needed then
+        if message_needed && ent:processing_status == "on" then
             send_directive("Needed Rumor Messaged Received")
         fired {
             raise gossip event "needed_rumor_received" attributes event:attrs
@@ -331,8 +331,17 @@ ruleset gossip {
     // Seen from Peers
     ///////////////////////////////////////
 
+    rule filter_seens {
+        select when gossip seen 
+        if ent:processing_status == "on" then
+            send_directive("Seen Received")
+        fired {
+            raise gossip event "seen_received" attributes event:attrs
+        }
+    }
+
     rule process_seen {
-        select when gossip seen
+        select when gossip seen_received
             foreach get_unseen_messages(event:attrs{"summary"}) setting (unseen_message)
                 pre {
                     destination = event:attrs{"eci"}
@@ -384,7 +393,7 @@ ruleset gossip {
                     "attrs": {
                         "wellKnown_Tx": subs:wellKnown_Rx(){"id"},
                         "Tx_role": "node",
-                        "Tx_host": "http://1dfc38153d9d.ngrok.io",
+                        "Tx_host": "http://fdb835456322.ngrok.io",
                         "rx_gossip_id": ent:gossip_id, 
                         "Rx_role": "node",
                         "Rx_host": their_host,
@@ -458,6 +467,17 @@ ruleset gossip {
         }
     }
 
+    rule change_processing_status {
+        select when gossip process
+        pre {
+            new_status = event:attrs{"status"}
+        }
+        send_directive("processing status updated to " + new_status)
+        fired {
+            ent:processing_status := new_status
+        }
+    }
+
     rule reset_state {
         select when gossip reset_requested
         send_directive("Resetting state")
@@ -472,6 +492,7 @@ ruleset gossip {
             ent:sub_to_gossip := {}
             ent:gossip_interval := default_interval
             ent:last_temp := null
+            ent:processing_status := "on"
             raise gossip event "restart_requested"   
         }
     }
