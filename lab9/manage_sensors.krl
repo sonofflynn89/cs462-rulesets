@@ -6,6 +6,9 @@ ruleset manage_sensors {
     }
 
     global {
+        base_url = meta:rulesetConfig{"base_url"} ||
+        "file://C:/Users/Gina Pomar/cs462/cs462-rulesets"
+
         sensors = function() {
             ent:sensors || {}
         }
@@ -119,7 +122,7 @@ ruleset manage_sensors {
                         "eid": "install-ruleset",
                         "domain": "wrangler", "type": "install_ruleset_request",
                         "attrs": {
-                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab9/sensor_profile.krl",
+                            "absoluteURL":  base_url + "/lab9/sensor_profile.krl",
                             "rid": "sensor_profile",
                             "config": {},
                             "sensor_name": sensor_name
@@ -132,7 +135,7 @@ ruleset manage_sensors {
                         "eid": "install-ruleset",
                         "domain": "wrangler", "type": "install_ruleset_request",
                         "attrs": {
-                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab9/temperature_store.krl",
+                            "absoluteURL":  base_url + "/lab9/temperature_store.krl",
                             "rid": "temperature_store",
                             "config": {},
                         }
@@ -144,7 +147,7 @@ ruleset manage_sensors {
                         "eid": "install-ruleset",
                         "domain": "wrangler", "type": "install_ruleset_request",
                         "attrs": {
-                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab9/wovyn_base.krl",
+                            "absoluteURL":  base_url + "/lab9/wovyn_base.krl",
                             "rid": "wovyn_base",
                             "config": {},
                         }
@@ -168,7 +171,7 @@ ruleset manage_sensors {
                         "eid": "install-ruleset",
                         "domain": "wrangler", "type": "install_ruleset_request",
                         "attrs": {
-                            "absoluteURL": "file://C:/Users/Gina Pomar/cs462/cs462-rulesets/lab9/gossip.krl",
+                            "absoluteURL":  base_url + "/lab9/gossip.krl",
                             "rid": "gossip",
                             "config": {},
                         }

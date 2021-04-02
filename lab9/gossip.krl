@@ -217,7 +217,7 @@ ruleset gossip {
                     "eci": peer{"Tx"},
                     "domain": "gossip", "type": "rumor",
                     "attrs": message
-                })
+                }, peer{"Tx_host"})
             }
         fired {
             ent:peer_summaries{gossip_id} := ent:peer_summaries{gossip_id}.put([message_origin], message_number)
@@ -240,9 +240,10 @@ ruleset gossip {
                     "attrs": {
                         "gossip_id": ent:gossip_id,
                         "summary": ent:peer_summary{ent:gossip_id},
-                        "eci": chosen_peer{"Rx"}
+                        "eci": chosen_peer{"Rx"},
+                        "host": meta:host
                     }
-                })
+                }, chosen_peer{"Tx_host"})
             }
     }
 
@@ -335,6 +336,7 @@ ruleset gossip {
             foreach get_unseen_messages(event:attrs{"summary"}) setting (unseen_message)
                 pre {
                     destination = event:attrs{"eci"}
+                    host = event:attrs{"host"}
                     gossip_id = event:attrs{"gossip_id"}    
                 }
                 every {
@@ -343,7 +345,7 @@ ruleset gossip {
                         "eci": destination,
                         "domain": "gossip", "type": "rumor",
                         "attrs": unseen_message
-                    })
+                    }, host)
                 }
                 always {
                     ent:peer_summary{gossip_id} := event:attrs{"summary"} on final 
@@ -370,6 +372,8 @@ ruleset gossip {
         pre {
             wellKnown_eci = event:attrs{"wellKnown_eci"}
             gossip_id = event:attrs{"gossip_id"}
+            their_host = event:attrs{"host"}.klog("Host")
+            x = meta:host.klog("Meta")
         }
         if wellKnown_eci && gossip_id then
             every {
@@ -380,13 +384,15 @@ ruleset gossip {
                     "attrs": {
                         "wellKnown_Tx": subs:wellKnown_Rx(){"id"},
                         "Tx_role": "node",
+                        "Tx_host": "http://1dfc38153d9d.ngrok.io",
                         "rx_gossip_id": ent:gossip_id, 
                         "Rx_role": "node",
+                        "Rx_host": their_host,
                         "tx_gossip_id": gossip_id,
                         "name": ent:gossip_id + ":" + gossip_id,
                         "channel_type": "subscription",
                     }
-                })
+                }, their_host)
             }
     }
 
@@ -457,7 +463,6 @@ ruleset gossip {
         send_directive("Resetting state")
         always {
             raise gossip event "stop_requested"
-            raise sensor event "reading_reset"
             ent:sequence_number := 0
             ent:temperature_logs := {}
             ent:temperature_logs{ent:gossip_id} := {}
