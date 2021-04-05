@@ -8,8 +8,8 @@ ruleset gossip {
     }
 
     global {
-        default_interval = 20 // 20 seconds
-        
+        default_interval = 10 // 20 seconds
+        my_host = meta:rulesetConfig{"my_host"} || meta:host
         //////////////////////
         // Debug Functions
         //////////////////////
@@ -227,8 +227,10 @@ ruleset gossip {
     rule start_seen_round {
         select when gossip seen_round_requested
         pre {
-            num_peers = subs:established().length() || 1
-            peer_index = random:integer(num_peers - 1)
+            num_peers = subs:established().length()
+            peer_index = ent:peer_last_seen + 1 < num_peers =>
+                ent:peer_last_seen + 1 | 
+                0
             chosen_peer = subs:established().slice(peer_index, peer_index).head() 
         }
         if chosen_peer then 
@@ -239,11 +241,14 @@ ruleset gossip {
                     "domain": "gossip", "type": "seen",
                     "attrs": {
                         "gossip_id": ent:gossip_id,
-                        "summary": ent:peer_summary{ent:gossip_id},
+                        "summary": ent:peer_summaries{ent:gossip_id},
                         "eci": chosen_peer{"Rx"},
                         "host": meta:host
                     }
                 }, chosen_peer{"Tx_host"})
+            }
+            fired {
+                ent:peer_last_seen := peer_index
             }
     }
 
@@ -333,9 +338,13 @@ ruleset gossip {
 
     rule filter_seens {
         select when gossip seen 
+        pre{
+            gossip_id = event:attrs{"gossip_id"}
+        }
         if ent:processing_status == "on" then
             send_directive("Seen Received")
         fired {
+            ent:peer_summaries{gossip_id} := event:attrs{"summary"}
             raise gossip event "seen_received" attributes event:attrs
         }
     }
@@ -346,7 +355,9 @@ ruleset gossip {
                 pre {
                     destination = event:attrs{"eci"}
                     host = event:attrs{"host"}
-                    gossip_id = event:attrs{"gossip_id"}    
+                    gossip_id = event:attrs{"gossip_id"}
+                    message_origin = unseen_message{"SensorID"}
+                    message_number = extract_message_number(unseen_message{"MessageID"})   
                 }
                 every {
                     send_directive("Sending Message")
@@ -356,20 +367,9 @@ ruleset gossip {
                         "attrs": unseen_message
                     }, host)
                 }
-                always {
-                    ent:peer_summary{gossip_id} := event:attrs{"summary"} on final 
+                fired {
+                    ent:peer_summaries{gossip_id} := ent:peer_summaries{gossip_id}.put(message_origin, message_number)
                 }
-
-
-        /**
-            The rule for responding to seen events should check for any 
-            rumors the pico knows about that are not in the seen message 
-            and send them (as rumors) to the pico that sent the seen event.  
-            Note that how this is done affects the amount of time it takes 
-            for the network to reach consistency. For example, you could 
-            just send one needed piece of information (the stingy algorithm) 
-            or all of the needed information. 
-        */
     }
 
     /////////////////////////////////
@@ -393,7 +393,7 @@ ruleset gossip {
                     "attrs": {
                         "wellKnown_Tx": subs:wellKnown_Rx(){"id"},
                         "Tx_role": "node",
-                        "Tx_host": "http://fdb835456322.ngrok.io",
+                        "Tx_host": my_host,
                         "rx_gossip_id": ent:gossip_id, 
                         "Rx_role": "node",
                         "Rx_host": their_host,
@@ -493,6 +493,7 @@ ruleset gossip {
             ent:gossip_interval := default_interval
             ent:last_temp := null
             ent:processing_status := "on"
+            ent:peer_last_seen := -1
             raise gossip event "restart_requested"   
         }
     }
