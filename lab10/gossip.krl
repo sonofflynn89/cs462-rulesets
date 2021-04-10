@@ -18,10 +18,10 @@ ruleset gossip {
                 "my_wellKnown": subs:wellKnown_Rx(){"id"},
                 "gossip_id": ent:gossip_id,
                 "interval": ent:gossip_interval,
-                "sequence": ent:sequence_number,
+                "temp_sequence": ent:temp_sequence_number,
                 "sub_to_gossip": ent:sub_to_gossip,
-                "summaries": ent:peer_summaries,
-                "logs": ent:temperature_logs,
+                "temp_summaries": ent:temp_summaries,
+                "logs": ent:temp_logs,
             }
         }
         
@@ -51,8 +51,8 @@ ruleset gossip {
         peer_in_most_need = function() {
             peers = subs:established().map(function(peer) {
                 gossip_id = ent:sub_to_gossip{peer{"Id"}}
-                self_summary = ent:peer_summaries{ent:gossip_id}
-                peer_summary = ent:peer_summaries{gossip_id} || {}
+                self_summary = ent:temp_summaries{ent:gossip_id}
+                peer_summary = ent:temp_summaries{gossip_id} || {}
 
                 num_missing = self_summary.keys()
                     .filter(function(key) {
@@ -87,8 +87,8 @@ ruleset gossip {
         }
 
         first_needed_message = function(peer_gossip_id) {
-            peer_summary = ent:peer_summaries{peer_gossip_id} || {}
-            self_summary = ent:peer_summaries{ent:gossip_id}
+            peer_summary = ent:temp_summaries{peer_gossip_id} || {}
+            self_summary = ent:temp_summaries{ent:gossip_id}
     
             missing_messages = self_summary.keys()
                 .filter(function(gossip_id) {
@@ -109,14 +109,14 @@ ruleset gossip {
                     message_number = info{"peer_number"} + 1
                     message_key =  gossip_id + ":" + message_number.as("String")
                     
-                    ent:temperature_logs{[gossip_id, message_key]}
+                    ent:temp_logs{[gossip_id, message_key]}
                 })
             
             missing_messages.head()
         }
 
         get_unseen_messages = function(peer_summary) {
-            ent:temperature_logs.values()
+            ent:temp_logs.values()
                 // Combine all messages into one array
                 .reduce(function(acc, log_section) {
                     acc.append(log_section.values())
@@ -165,7 +165,7 @@ ruleset gossip {
         pre {
             new_temp = temperature_store:temperatures().head()
             message = {
-                "MessageID": ent:gossip_id + ":" + ent:sequence_number,
+                "MessageID": ent:gossip_id + ":" + ent:temp_sequence_number,
                 "SensorID": ent:gossip_id,
                 "Temperature": new_temp{"temperature"},
                 "Timestamp": new_temp{"timestamp"}
@@ -174,7 +174,7 @@ ruleset gossip {
         send_directive("New reading detected")
         always {
             raise gossip event "rumor" attributes message
-            ent:sequence_number := ent:sequence_number + 1
+            ent:temp_sequence_number := ent:temp_sequence_number + 1
             ent:last_temp := new_temp
         }
     }
@@ -220,7 +220,7 @@ ruleset gossip {
                 }, peer{"Tx_host"})
             }
         fired {
-            ent:peer_summaries{gossip_id} := ent:peer_summaries{gossip_id}.put([message_origin], message_number)
+            ent:temp_summaries{gossip_id} := ent:temp_summaries{gossip_id}.put([message_origin], message_number)
         }
     }
 
@@ -241,7 +241,7 @@ ruleset gossip {
                     "domain": "gossip", "type": "seen",
                     "attrs": {
                         "gossip_id": ent:gossip_id,
-                        "summary": ent:peer_summaries{ent:gossip_id},
+                        "summary": ent:temp_summaries{ent:gossip_id},
                         "eci": chosen_peer{"Rx"},
                         "host": meta:host
                     }
@@ -261,7 +261,7 @@ ruleset gossip {
         pre {
             message_id = event:attrs{"MessageID"}
             gossip_id = event:attrs{"SensorID"}
-            message_needed = ent:temperature_logs{[gossip_id, message_id]} == null
+            message_needed = ent:temp_logs{[gossip_id, message_id]} == null
         }
         if message_needed && ent:processing_status == "on" then
             send_directive("Needed Rumor Messaged Received")
@@ -274,7 +274,7 @@ ruleset gossip {
         select when gossip needed_rumor_received
         pre {
             gossip_id = event:attrs{"SensorID"}
-            is_new_origin = ent:temperature_logs{gossip_id} == null
+            is_new_origin = ent:temp_logs{gossip_id} == null
         }
         if is_new_origin then
             send_directive("New origin detected: " + gossip_id)
@@ -292,19 +292,19 @@ ruleset gossip {
             gossip_id = event:attrs{"SensorID"}
 
             message_number = extract_message_number(message_id)
-            highest_message_number = ent:peer_summaries{[ent:gossip_id, gossip_id]}
+            highest_message_number = ent:temp_summaries{[ent:gossip_id, gossip_id]}
             updated_summary_number = 
                 message_number == highest_message_number + 1 => 
                     message_number | 
                     highest_message_number
             
-            self_summary = ent:peer_summaries{ent:gossip_id}
+            self_summary = ent:temp_summaries{ent:gossip_id}
 
         }
         send_directive("Rumor Received from known origin with message_id " + message_id)
         fired {
-            ent:temperature_logs{[gossip_id, message_id]} := event:attrs
-            ent:peer_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+            ent:temp_logs{[gossip_id, message_id]} := event:attrs
+            ent:temp_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
         }
     }
 
@@ -319,16 +319,16 @@ ruleset gossip {
                 message_number == 0 =>
                     message_number |
                     -1
-            self_summary = ent:peer_summaries{ent:gossip_id}
+            self_summary = ent:temp_summaries{ent:gossip_id}
 
         }
         send_directive("Rumor Received from known origin with message_id " + message_id)
         fired {
-            ent:temperature_logs{gossip_id} := {}
-            ent:peer_summaries{gossip_id} := {}
+            ent:temp_logs{gossip_id} := {}
+            ent:temp_summaries{gossip_id} := {}
 
-            ent:temperature_logs{[gossip_id, message_id]} := event:attrs
-            ent:peer_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+            ent:temp_logs{[gossip_id, message_id]} := event:attrs
+            ent:temp_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
         }
     }
 
@@ -344,7 +344,7 @@ ruleset gossip {
         if ent:processing_status == "on" then
             send_directive("Seen Received")
         fired {
-            ent:peer_summaries{gossip_id} := event:attrs{"summary"}
+            ent:temp_summaries{gossip_id} := event:attrs{"summary"}
             raise gossip event "seen_received" attributes event:attrs
         }
     }
@@ -368,7 +368,7 @@ ruleset gossip {
                     }, host)
                 }
                 fired {
-                    ent:peer_summaries{gossip_id} := ent:peer_summaries{gossip_id}.put(message_origin, message_number)
+                    ent:temp_summaries{gossip_id} := ent:temp_summaries{gossip_id}.put(message_origin, message_number)
                 }
     }
 
@@ -419,9 +419,9 @@ ruleset gossip {
             raise wrangler event "pending_subscription_approval"
                 attributes event:attrs
             ent:sub_to_gossip{sub_id} := their_gossip_id
-            ent:temperature_logs{their_gossip_id} := {}
-            ent:peer_summaries{ent:gossip_id} := ent:peer_summaries{ent:gossip_id}.put([their_gossip_id], -1)
-            ent:peer_summaries{their_gossip_id} := {}
+            ent:temp_logs{their_gossip_id} := {}
+            ent:temp_summaries{ent:gossip_id} := ent:temp_summaries{ent:gossip_id}.put([their_gossip_id], -1)
+            ent:temp_summaries{their_gossip_id} := {}
         } else {
             raise wrangler event "inbound_rejection"
                 attributes event:attrs
@@ -437,9 +437,9 @@ ruleset gossip {
         send_directive("Subscription Request for "+ their_gossip_id + " approved")
         always {
             ent:sub_to_gossip{sub_id} := their_gossip_id
-            ent:temperature_logs{their_gossip_id} := {}
-            ent:peer_summaries{ent:gossip_id} := ent:peer_summaries{ent:gossip_id}.put([their_gossip_id], -1)
-            ent:peer_summaries{their_gossip_id} := {}
+            ent:temp_logs{their_gossip_id} := {}
+            ent:temp_summaries{ent:gossip_id} := ent:temp_summaries{ent:gossip_id}.put([their_gossip_id], -1)
+            ent:temp_summaries{their_gossip_id} := {}
         }
     }
 
@@ -483,12 +483,12 @@ ruleset gossip {
         send_directive("Resetting state")
         always {
             raise gossip event "stop_requested"
-            ent:sequence_number := 0
-            ent:temperature_logs := {}
-            ent:temperature_logs{ent:gossip_id} := {}
-            ent:peer_summaries := {}
-            ent:peer_summaries{ent:gossip_id} := {}
-            ent:peer_summaries{[ent:gossip_id, ent:gossip_id]} := -1
+            ent:temp_sequence_number := 0
+            ent:temp_logs := {}
+            ent:temp_logs{ent:gossip_id} := {}
+            ent:temp_summaries := {}
+            ent:temp_summaries{ent:gossip_id} := {}
+            ent:temp_summaries{[ent:gossip_id, ent:gossip_id]} := -1
             ent:sub_to_gossip := {}
             ent:gossip_interval := default_interval
             ent:last_temp := null
