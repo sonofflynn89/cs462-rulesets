@@ -33,6 +33,7 @@ ruleset gossip {
                 "interval": ent:gossip_interval,
                 "threshold_sequence": ent:threshold_sequence_number,
                 "is_violating_threshold": ent:is_violating_threshold,
+                "threshold_counter": ent:threshold_counter,
                 "sub_to_gossip": ent:sub_to_gossip,
                 "threshold_summaries": ent:threshold_summaries,
                 "logs": ent:threshold_logs,
@@ -240,23 +241,39 @@ ruleset gossip {
     rule start_gossip_round {
         select when gossip start_round_requested
         pre {
-            message_type = random:integer(1) > 0 => "rumor" | "seen"
+            // message_type = random:integer(1) > 0 => "rumor" | "seen"
         }
-        if message_type == "rumor" then
+        // if message_type == "rumor" then
             send_directive("Rumor Round Selected")
         fired {
             raise gossip event "rumor_round_requested"
         } else {
-            raise gossip event "seen_round_requested"
+            // raise gossip event "seen_round_requested"
         }
     }
 
     /////////////////////////////////////////////////
-    // Gossip Part 3: Select Peer and Send Message
+    // Gossip Part 3a: Select Peer and Send Rumor
     /////////////////////////////////////////////////
 
     rule start_rumor_round {
         select when gossip rumor_round_requested
+        pre {
+            rumor_type = ent:last_rumor_type == "threshold" => "temp" | "threshold"
+        }
+        if rumor_type == "threshold" then
+            send_directive("Threshold Rumor Round Selected")
+        fired {
+            raise gossip event "threshold_rumor_round_requested"
+            ent:last_rumor_type := rumor_type
+        } else {
+            raise gossip event "temp_rumor_round_requested"
+            ent:last_rumor_type := rumor_type
+        }
+    }
+
+    rule start_temp_rumor_round {
+        select when gossip temp_rumor_round_requested
         pre {
             peer = peer_in_most_need()
             gossip_id = peer => ent:sub_to_gossip{peer{"Id"}} | null
@@ -278,6 +295,9 @@ ruleset gossip {
         }
     }
 
+    /////////////////////////////////////////////////
+    // Gossip Part 3b: Select Peer and Send Seen
+    /////////////////////////////////////////////////
     rule start_seen_round {
         select when gossip seen_round_requested
         pre {
@@ -317,8 +337,8 @@ ruleset gossip {
             gossip_id = event:attrs{"SensorID"}
             message_needed = 
                 event:attrs{"type"} == "temp" =>
-                ent:temp_summary{gossip_id} == null || ent:temp_summary{gossip_id} + 1 == message_number |
-                ent:threshold_summary{gossip_id} == null || ent:threshold_summary{gossip_id} + 1 == message_number
+                    ent:temp_summary{gossip_id} == null || ent:temp_summary{gossip_id} + 1 == message_number |
+                    ent:threshold_summary{gossip_id} == null || ent:threshold_summary{gossip_id} + 1 == message_number
         }
         if message_needed && ent:processing_status == "on" then
             send_directive("Needed Rumor Messaged Received")
@@ -413,6 +433,7 @@ ruleset gossip {
         pre {
             message_id = event:attrs{"MessageID"}
             gossip_id = event:attrs{"SensorID"}
+            counter_increment = event:attrs{"counter_increment"}
 
             message_number = extract_message_number(message_id)
             highest_message_number = ent:threshold_summaries{[ent:gossip_id, gossip_id]}
@@ -428,6 +449,7 @@ ruleset gossip {
         fired {
             ent:threshold_logs{[gossip_id, message_id]} := event:attrs
             ent:threshold_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+            ent:threshold_counter := ent:threshold_counter + counter_increment
         }
     }
 
@@ -436,6 +458,7 @@ ruleset gossip {
         pre {
             message_id = event:attrs{"MessageID"}
             gossip_id = event:attrs{"SensorID"}
+            counter_increment = event:attrs{"counter_increment"}
 
             message_number = extract_message_number(message_id)
             updated_summary_number = 
@@ -452,6 +475,7 @@ ruleset gossip {
 
             ent:threshold_logs{[gossip_id, message_id]} := event:attrs
             ent:threshold_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+            ent:threshold_counter := ent:threshold_counter + counter_increment
         }
     }
 
@@ -659,6 +683,7 @@ ruleset gossip {
             ent:last_temp := null
             ent:processing_status := "on"
             ent:peer_last_seen := -1
+            ent:last_rumor_type := "threshold"
 
             raise gossip event "restart_requested"   
         }
