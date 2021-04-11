@@ -2,8 +2,8 @@ ruleset gossip {
     meta {
         use module io.picolabs.subscription alias subs
         use module temperature_store
-        shares health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
-        provides health_check,  peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
+        shares temp_health_check, threshold_health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
+        provides temp_health_check, threshold_health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
         
     }
 
@@ -13,7 +13,7 @@ ruleset gossip {
         //////////////////////
         // Debug Functions
         //////////////////////
-        health_check = function() {
+        temp_health_check = function() {
             {
                 "my_wellKnown": subs:wellKnown_Rx(){"id"},
                 "gossip_id": ent:gossip_id,
@@ -22,6 +22,18 @@ ruleset gossip {
                 "sub_to_gossip": ent:sub_to_gossip,
                 "temp_summaries": ent:temp_summaries,
                 "logs": ent:temp_logs,
+            }
+        }
+
+        threshold_health_check = function() {
+            {
+                "my_wellKnown": subs:wellKnown_Rx(){"id"},
+                "gossip_id": ent:gossip_id,
+                "interval": ent:gossip_interval,
+                "threshold_sequence": ent:threshold_sequence_number,
+                "sub_to_gossip": ent:sub_to_gossip,
+                "threshold_summaries": ent:threshold_summaries,
+                "logs": ent:threshold_logs,
             }
         }
         
@@ -168,7 +180,8 @@ ruleset gossip {
                 "MessageID": ent:gossip_id + ":" + ent:temp_sequence_number,
                 "SensorID": ent:gossip_id,
                 "Temperature": new_temp{"temperature"},
-                "Timestamp": new_temp{"timestamp"}
+                "Timestamp": new_temp{"timestamp"},
+                "type": "temp"
             }
         }
         send_directive("New reading detected")
@@ -253,15 +266,18 @@ ruleset gossip {
     }
 
     /////////////////////////////////
-    // Rumors from Peers
+    // Temp Rumors from Peers
     /////////////////////////////////
 
     rule process_rumor {
         select when gossip rumor
         pre {
-            message_id = event:attrs{"MessageID"}
+            message_number = extract_message_number(event:attrs{"MessageID"})
             gossip_id = event:attrs{"SensorID"}
-            message_needed = ent:temp_logs{[gossip_id, message_id]} == null
+            message_needed = 
+                event:attrs{"type"} == "temp" =>
+                ent:temp_summary{gossip_id} == null || ent:temp_summary{gossip_id} + 1 == message_number |
+                ent:threshold_summary{gossip_id} == null || ent:threshold_summary{gossip_id} + 1 == message_number
         }
         if message_needed && ent:processing_status == "on" then
             send_directive("Needed Rumor Messaged Received")
@@ -270,8 +286,8 @@ ruleset gossip {
         }
     }
 
-    rule determine_rumor_origin {
-        select when gossip needed_rumor_received
+    rule determine_temp_rumor_origin {
+        select when gossip needed_rumor_received where event:attrs{"type"} == "temp"
         pre {
             gossip_id = event:attrs{"SensorID"}
             is_new_origin = ent:temp_logs{gossip_id} == null
@@ -285,8 +301,8 @@ ruleset gossip {
         }
     }
 
-    rule process_rumor_from_known_origin {
-        select when gossip rumor_from_known_origin_received
+    rule process_temp_rumor_from_known_origin {
+        select when gossip rumor_from_known_origin_received where event:attrs{"type"} == "temp"
         pre {
             message_id = event:attrs{"MessageID"}
             gossip_id = event:attrs{"SensorID"}
@@ -301,15 +317,15 @@ ruleset gossip {
             self_summary = ent:temp_summaries{ent:gossip_id}
 
         }
-        send_directive("Rumor Received from known origin with message_id " + message_id)
+        send_directive("Temp Rumor Received from known origin with message_id " + message_id)
         fired {
             ent:temp_logs{[gossip_id, message_id]} := event:attrs
             ent:temp_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
         }
     }
 
-    rule process_rumor_from_new_origin {
-        select when gossip rumor_from_new_origin_received
+    rule process_temp_rumor_from_new_origin {
+        select when gossip rumor_from_new_origin_received where event:attrs{"type"} == "temp"
         pre {
             message_id = event:attrs{"MessageID"}
             gossip_id = event:attrs{"SensorID"}
@@ -322,13 +338,79 @@ ruleset gossip {
             self_summary = ent:temp_summaries{ent:gossip_id}
 
         }
-        send_directive("Rumor Received from known origin with message_id " + message_id)
+        send_directive("Temp Rumor Received from known origin with message_id " + message_id)
         fired {
             ent:temp_logs{gossip_id} := {}
             ent:temp_summaries{gossip_id} := {}
 
             ent:temp_logs{[gossip_id, message_id]} := event:attrs
             ent:temp_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+        }
+    }
+
+    ///////////////////////////////////////
+    // Threshold Rumors from Peers
+    ///////////////////////////////////////
+
+    rule determine_threshold_rumor_origin {
+        select when gossip needed_rumor_received where event:attrs{"type"} == "threshold"
+        pre {
+            gossip_id = event:attrs{"SensorID"}
+            is_new_origin = ent:threshold_logs{gossip_id} == null
+        }
+        if is_new_origin then
+            send_directive("New origin detected: " + gossip_id)
+        fired {
+            raise gossip event "rumor_from_new_origin_received" attributes event:attrs
+        } else {
+            raise gossip event "rumor_from_known_origin_received" attributes event:attrs
+        }
+    }
+
+    rule process_threshold_rumor_from_known_origin {
+        select when gossip rumor_from_known_origin_received where event:attrs{"type"} == "threshold"
+        pre {
+            message_id = event:attrs{"MessageID"}
+            gossip_id = event:attrs{"SensorID"}
+
+            message_number = extract_message_number(message_id)
+            highest_message_number = ent:threshold_summaries{[ent:gossip_id, gossip_id]}
+            updated_summary_number = 
+                message_number == highest_message_number + 1 => 
+                    message_number | 
+                    highest_message_number
+            
+            self_summary = ent:threshold_summaries{ent:gossip_id}
+
+        }
+        send_directive("Threshold Rumor Received from known origin with message_id " + message_id)
+        fired {
+            ent:threshold_logs{[gossip_id, message_id]} := event:attrs
+            ent:threshold_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
+        }
+    }
+
+    rule process_threshold_rumor_from_new_origin {
+        select when gossip rumor_from_new_origin_received where event:attrs{"type"} == "threshold"
+        pre {
+            message_id = event:attrs{"MessageID"}
+            gossip_id = event:attrs{"SensorID"}
+
+            message_number = extract_message_number(message_id)
+            updated_summary_number = 
+                message_number == 0 =>
+                    message_number |
+                    -1
+            self_summary = ent:threshold_summaries{ent:gossip_id}
+
+        }
+        send_directive("Threshold Rumor Received from known origin with message_id " + message_id)
+        fired {
+            ent:threshold_logs{gossip_id} := {}
+            ent:threshold_summaries{gossip_id} := {}
+
+            ent:threshold_logs{[gossip_id, message_id]} := event:attrs
+            ent:threshold_summaries{ent:gossip_id} := self_summary.put([gossip_id], updated_summary_number)
         }
     }
 
@@ -419,9 +501,20 @@ ruleset gossip {
             raise wrangler event "pending_subscription_approval"
                 attributes event:attrs
             ent:sub_to_gossip{sub_id} := their_gossip_id
+
+            //////////////////////////////
+            // Temperature Initialization
+            //////////////////////////////
             ent:temp_logs{their_gossip_id} := {}
             ent:temp_summaries{ent:gossip_id} := ent:temp_summaries{ent:gossip_id}.put([their_gossip_id], -1)
             ent:temp_summaries{their_gossip_id} := {}
+
+            //////////////////////////////
+            // Threshold Initialization
+            //////////////////////////////
+            ent:threshold_logs{their_gossip_id} := {}
+            ent:threshold_summaries{ent:gossip_id} := ent:threshold_summaries{ent:gossip_id}.put([their_gossip_id], -1)
+            ent:threshold_summaries{their_gossip_id} := {}
         } else {
             raise wrangler event "inbound_rejection"
                 attributes event:attrs
@@ -437,9 +530,20 @@ ruleset gossip {
         send_directive("Subscription Request for "+ their_gossip_id + " approved")
         always {
             ent:sub_to_gossip{sub_id} := their_gossip_id
+
+            //////////////////////////////
+            // Temperature Initialization
+            //////////////////////////////
             ent:temp_logs{their_gossip_id} := {}
             ent:temp_summaries{ent:gossip_id} := ent:temp_summaries{ent:gossip_id}.put([their_gossip_id], -1)
             ent:temp_summaries{their_gossip_id} := {}
+
+            //////////////////////////////
+            // Threshold Initialization
+            //////////////////////////////
+            ent:threshold_logs{their_gossip_id} := {}
+            ent:threshold_summaries{ent:gossip_id} := ent:threshold_summaries{ent:gossip_id}.put([their_gossip_id], -1)
+            ent:threshold_summaries{their_gossip_id} := {}
         }
     }
 
@@ -483,17 +587,37 @@ ruleset gossip {
         send_directive("Resetting state")
         always {
             raise gossip event "stop_requested"
+
+            /////////////////////////////////
+            // Temperature Related Variables
+            /////////////////////////////////
             ent:temp_sequence_number := 0
             ent:temp_logs := {}
             ent:temp_logs{ent:gossip_id} := {}
             ent:temp_summaries := {}
             ent:temp_summaries{ent:gossip_id} := {}
             ent:temp_summaries{[ent:gossip_id, ent:gossip_id]} := -1
+
+            /////////////////////////////////
+            // Threshold Related Variables
+            /////////////////////////////////
+            ent:threshold_sequence_number := 0
+            ent:threshold_logs := {}
+            ent:threshold_logs{ent:gossip_id} := {}
+            ent:threshold_summaries := {}
+            ent:threshold_summaries{ent:gossip_id} := {}
+            ent:threshold_summaries{[ent:gossip_id, ent:gossip_id]} := -1
+            ent:threshold_counter := 0
+
+            /////////////////////////
+            // Other Variables
+            /////////////////////////
             ent:sub_to_gossip := {}
             ent:gossip_interval := default_interval
             ent:last_temp := null
             ent:processing_status := "on"
             ent:peer_last_seen := -1
+
             raise gossip event "restart_requested"   
         }
     }
