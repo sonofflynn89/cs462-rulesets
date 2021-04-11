@@ -3,8 +3,8 @@ ruleset gossip {
         use module io.picolabs.subscription alias subs
         use module temperature_store
         use module sensor_profile
-        shares temp_health_check, threshold_health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
-        provides temp_health_check, threshold_health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
+        shares temp_health_check, threshold_health_check, peer_in_most_temp_need, first_needed_temp_message, get_unseen_messages, scheduled_heartbeats, peer_in_most_threshold_need, first_needed_threshold_message
+        provides temp_health_check, threshold_health_check, peer_in_most_temp_need, first_needed_temp_message, get_unseen_messages, scheduled_heartbeats, peer_in_most_threshold_need, first_needed_threshold_message
         
     }
 
@@ -55,9 +55,6 @@ ruleset gossip {
             message_id.split(re#:#).reverse().head().as("Number")
         }
 
-        ///////////////////////
-        // Gossip Functions
-        ///////////////////////
         temperature_synced = function() {
             current_temp = temperature_store:temperatures().head()
 
@@ -67,14 +64,11 @@ ruleset gossip {
             ent:last_temp{"timestamp"} == current_temp{"timestamp"}
         }
 
-        get_counter_increment = function(temp) {
-            violates_threshold = temp{"temperature"} > sensor_profile:threshold()
-            violation_increase = ent:is_violating_threshold => 0 | 1
-            non_violation_decrease = ent:is_violating_threshold => -1 | 0
-            violates_threshold => violation_increase | non_violation_decrease
-        }
-
-        peer_in_most_need = function() {
+        ////////////////////////////////
+        // Gossip Temperature Functions
+        ////////////////////////////////
+        
+        peer_in_most_temp_need = function() {
             peers = subs:established().map(function(peer) {
                 gossip_id = ent:sub_to_gossip{peer{"Id"}}
                 self_summary = ent:temp_summaries{ent:gossip_id}
@@ -112,7 +106,7 @@ ruleset gossip {
             chosen_peer != null && chosen_peer{"num_missing"} > 0 => chosen_peer.put() | null
         }
 
-        first_needed_message = function(peer_gossip_id) {
+        first_needed_temp_message = function(peer_gossip_id) {
             peer_summary = ent:temp_summaries{peer_gossip_id} || {}
             self_summary = ent:temp_summaries{ent:gossip_id}
     
@@ -140,6 +134,88 @@ ruleset gossip {
             
             missing_messages.head()
         }
+
+        ///////////////////////////////
+        // Gossip Threshold Functions
+        ///////////////////////////////
+
+        peer_in_most_threshold_need = function() {
+            peers = subs:established().map(function(peer) {
+                gossip_id = ent:sub_to_gossip{peer{"Id"}}
+                self_summary = ent:threshold_summaries{ent:gossip_id}
+                peer_summary = ent:threshold_summaries{gossip_id} || {}
+
+                num_missing = self_summary.keys()
+                    .filter(function(key) {
+                        key != gossip_id
+                    })
+                    .map(function(key) {
+                        {
+                            "self_number": self_summary{key},
+                            "peer_number": peer_summary{key}
+                        }
+                    })
+                    .reduce(function(acc, info) {
+                        self_number = info{"self_number"}
+                        peer_number = info{"peer_number"}
+                        diff = peer_number == null => 
+                            self_number + 1 | 
+                            self_number - peer_number
+                        diff > 0 => 
+                            acc + diff | 
+                            acc
+                    }, 0)
+                
+                peer.put(["num_missing"], num_missing)
+            })
+
+            chosen_peer = peers.sort(function(peer1, peer2){
+                peer1{"num_missing"} < peer2{"num_missing"}  => 1 |
+                    peer1{"num_missing"} == peer2{"num_missing"} =>  0 | -1
+            }).head()
+
+            chosen_peer != null && chosen_peer{"num_missing"} > 0 => chosen_peer.put() | null
+        }
+
+        first_needed_threshold_message = function(peer_gossip_id) {
+            peer_summary = ent:threshold_summaries{peer_gossip_id} || {}
+            self_summary = ent:threshold_summaries{ent:gossip_id}
+    
+            missing_messages = self_summary.keys()
+                .filter(function(gossip_id) {
+                    gossip_id != peer_gossip_id
+                })
+                .map(function(gossip_id) {
+                    {
+                        "gossip_id": gossip_id,
+                        "self_number": self_summary{gossip_id},
+                        "peer_number": peer_summary{gossip_id} == null => -1 | peer_summary{gossip_id}
+                    }
+                })
+                .filter(function(info) {
+                    info{"self_number"} >= 0 && info{"self_number"} > info{"peer_number"}
+                })
+                .map(function(info) {
+                    gossip_id = info{"gossip_id"}
+                    message_number = info{"peer_number"} + 1
+                    message_key =  gossip_id + ":" + message_number.as("String")
+                    
+                    ent:threshold_logs{[gossip_id, message_key]}
+                })
+            
+            missing_messages.head()
+        }
+
+        get_counter_increment = function(temp) {
+            violates_threshold = temp{"temperature"} > sensor_profile:threshold()
+            violation_increase = ent:is_violating_threshold => 0 | 1
+            non_violation_decrease = ent:is_violating_threshold => -1 | 0
+            violates_threshold => violation_increase | non_violation_decrease
+        }
+
+        ///////////////////////////////
+        // Universal Gossip Functions
+        ///////////////////////////////
 
         get_unseen_messages = function(peer_summary) {
             ent:temp_logs.values()
@@ -275,15 +351,15 @@ ruleset gossip {
     rule start_temp_rumor_round {
         select when gossip temp_rumor_round_requested
         pre {
-            peer = peer_in_most_need()
+            peer = peer_in_most_temp_need()
             gossip_id = peer => ent:sub_to_gossip{peer{"Id"}} | null
-            message = peer => first_needed_message(gossip_id) | null
+            message = peer => first_needed_temp_message(gossip_id) | null
             message_number = peer => extract_message_number(message{"MessageID"}) | null
             message_origin = peer => message{"SensorID"} | null
         }
         if peer then
             every {
-                send_directive("Rumor Message Selected for peer " + gossip_id, message)
+                send_directive("Temp Rumor Message Selected for peer " + gossip_id, message)
                 event:send({
                     "eci": peer{"Tx"},
                     "domain": "gossip", "type": "rumor",
@@ -292,6 +368,29 @@ ruleset gossip {
             }
         fired {
             ent:temp_summaries{gossip_id} := ent:temp_summaries{gossip_id}.put([message_origin], message_number)
+        }
+    }
+
+    rule start_threshold_rumor_round {
+        select when gossip threshold_rumor_round_requested
+        pre {
+            peer = peer_in_most_threshold_need()
+            gossip_id = peer => ent:sub_to_gossip{peer{"Id"}} | null
+            message = peer => first_needed_threshold_message(gossip_id) | null
+            message_number = peer => extract_message_number(message{"MessageID"}) | null
+            message_origin = peer => message{"SensorID"} | null
+        }
+        if peer then
+            every {
+                send_directive("Threshold Rumor Message Selected for peer " + gossip_id, message)
+                event:send({
+                    "eci": peer{"Tx"},
+                    "domain": "gossip", "type": "rumor",
+                    "attrs": message
+                }, peer{"Tx_host"})
+            }
+        fired {
+            ent:threshold_summaries{gossip_id} := ent:threshold_summaries{gossip_id}.put([message_origin], message_number)
         }
     }
 
