@@ -3,8 +3,8 @@ ruleset gossip {
         use module io.picolabs.subscription alias subs
         use module temperature_store
         use module sensor_profile
-        shares temp_health_check, threshold_health_check, peer_in_most_temp_need, first_needed_temp_message, get_unseen_messages, scheduled_heartbeats, peer_in_most_threshold_need, first_needed_threshold_message
-        provides temp_health_check, threshold_health_check, peer_in_most_temp_need, first_needed_temp_message, get_unseen_messages, scheduled_heartbeats, peer_in_most_threshold_need, first_needed_threshold_message
+        shares temp_health_check, threshold_health_check, peer_in_most_temp_need, first_needed_temp_message, get_unseen_temp_messages, scheduled_heartbeats, peer_in_most_threshold_need, first_needed_threshold_message
+        provides temp_health_check, threshold_health_check, peer_in_most_temp_need, first_needed_temp_message, get_unseen_temp_messages, scheduled_heartbeats, peer_in_most_threshold_need, first_needed_threshold_message
         
     }
 
@@ -18,6 +18,7 @@ ruleset gossip {
             {
                 "my_wellKnown": subs:wellKnown_Rx(){"id"},
                 "gossip_id": ent:gossip_id,
+                "peer_last_seen": ent:peer_last_seen,
                 "interval": ent:gossip_interval,
                 "temp_sequence": ent:temp_sequence_number,
                 "sub_to_gossip": ent:sub_to_gossip,
@@ -217,8 +218,30 @@ ruleset gossip {
         // Universal Gossip Functions
         ///////////////////////////////
 
-        get_unseen_messages = function(peer_summary) {
+        get_unseen_temp_messages = function(peer_summary) {
             ent:temp_logs.values()
+                // Combine all messages into one array
+                .reduce(function(acc, log_section) {
+                    acc.append(log_section.values())
+                }, [])
+                .filter(function(message){
+                    gossip_id = message{"SensorID"}
+                    message_id = message{"MessageID"}
+                    message_number = extract_message_number(message{"MessageID"})
+                    highest_peer_number = 
+                        peer_summary{gossip_id} == null => 
+                            -1 | 
+                            peer_summary{gossip_id}
+
+                    unknown_origin = peer_summary{gossip_id} == null
+                    unseen_message = message_number > highest_peer_number
+
+                    unknown_origin || unseen_message
+                })
+        }
+
+        get_unseen_threshold_messages = function(peer_summary) { 
+            ent:threshold_logs.values()
                 // Combine all messages into one array
                 .reduce(function(acc, log_section) {
                     acc.append(log_section.values())
@@ -317,14 +340,14 @@ ruleset gossip {
     rule start_gossip_round {
         select when gossip start_round_requested
         pre {
-            // message_type = random:integer(1) > 0 => "rumor" | "seen"
+            message_type = random:integer(1) > 0 => "rumor" | "seen"
         }
-        // if message_type == "rumor" then
+        if message_type == "rumor" then
             send_directive("Rumor Round Selected")
         fired {
             raise gossip event "rumor_round_requested"
         } else {
-            // raise gossip event "seen_round_requested"
+            raise gossip event "seen_round_requested"
         }
     }
 
@@ -414,7 +437,8 @@ ruleset gossip {
                     "domain": "gossip", "type": "seen",
                     "attrs": {
                         "gossip_id": ent:gossip_id,
-                        "summary": ent:temp_summaries{ent:gossip_id},
+                        "temp_summary": ent:temp_summaries{ent:gossip_id},
+                        "threshold_summary": ent:threshold_summaries{ent:gossip_id},
                         "eci": chosen_peer{"Rx"},
                         "host": meta:host
                     }
@@ -590,14 +614,15 @@ ruleset gossip {
         if ent:processing_status == "on" then
             send_directive("Seen Received")
         fired {
-            ent:temp_summaries{gossip_id} := event:attrs{"summary"}
+            ent:temp_summaries{gossip_id} := event:attrs{"temp_summary"}
+            ent:threshold_summaries{gossip_id} := event:attrs{"threshold_summary"}
             raise gossip event "seen_received" attributes event:attrs
         }
     }
 
-    rule process_seen {
+    rule process_temp_seen {
         select when gossip seen_received
-            foreach get_unseen_messages(event:attrs{"summary"}) setting (unseen_message)
+            foreach get_unseen_temp_messages(event:attrs{"temp_summary"}) setting (unseen_message)
                 pre {
                     destination = event:attrs{"eci"}
                     host = event:attrs{"host"}
@@ -615,6 +640,29 @@ ruleset gossip {
                 }
                 fired {
                     ent:temp_summaries{gossip_id} := ent:temp_summaries{gossip_id}.put(message_origin, message_number)
+                }
+    }
+
+    rule process_threshold_seen {
+        select when gossip seen_received
+            foreach get_unseen_threshold_messages(event:attrs{"threshold_summary"}) setting (unseen_message)
+                pre {
+                    destination = event:attrs{"eci"}
+                    host = event:attrs{"host"}
+                    gossip_id = event:attrs{"gossip_id"}
+                    message_origin = unseen_message{"SensorID"}
+                    message_number = extract_message_number(unseen_message{"MessageID"})   
+                }
+                every {
+                    send_directive("Sending Message")
+                    event:send({
+                        "eci": destination,
+                        "domain": "gossip", "type": "rumor",
+                        "attrs": unseen_message
+                    }, host)
+                }
+                fired {
+                    ent:threshold_summaries{gossip_id} := ent:threshold_summaries{gossip_id}.put(message_origin, message_number)
                 }
     }
 
