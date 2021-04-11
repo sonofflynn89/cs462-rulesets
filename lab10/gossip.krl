@@ -2,6 +2,7 @@ ruleset gossip {
     meta {
         use module io.picolabs.subscription alias subs
         use module temperature_store
+        use module sensor_profile
         shares temp_health_check, threshold_health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
         provides temp_health_check, threshold_health_check, peer_in_most_need, first_needed_message, get_unseen_messages, scheduled_heartbeats
         
@@ -31,12 +32,28 @@ ruleset gossip {
                 "gossip_id": ent:gossip_id,
                 "interval": ent:gossip_interval,
                 "threshold_sequence": ent:threshold_sequence_number,
+                "is_violating_threshold": ent:is_violating_threshold,
                 "sub_to_gossip": ent:sub_to_gossip,
                 "threshold_summaries": ent:threshold_summaries,
                 "logs": ent:threshold_logs,
             }
         }
-        
+
+        scheduled_heartbeats = function() {
+            schedule:list().filter(function(e) {
+                e{["event", "domain"]} == "gossip" && 
+                e{["event", "name"]} == "heartbeat"
+            })
+        }
+
+        ///////////////////////
+        // General Utils
+        ///////////////////////
+
+        extract_message_number = function(message_id) {
+            message_id.split(re#:#).reverse().head().as("Number")
+        }
+
         ///////////////////////
         // Gossip Functions
         ///////////////////////
@@ -49,15 +66,11 @@ ruleset gossip {
             ent:last_temp{"timestamp"} == current_temp{"timestamp"}
         }
 
-        extract_message_number = function(message_id) {
-            message_id.split(re#:#).reverse().head().as("Number")
-        }
-
-        scheduled_heartbeats = function() {
-            schedule:list().filter(function(e) {
-                e{["event", "domain"]} == "gossip" && 
-                e{["event", "name"]} == "heartbeat"
-            })
+        get_counter_increment = function(temp) {
+            violates_threshold = temp{"temperature"} > sensor_profile:threshold()
+            violation_increase = ent:is_violating_threshold => 0 | 1
+            non_violation_decrease = ent:is_violating_threshold => -1 | 0
+            violates_threshold => violation_increase | non_violation_decrease
         }
 
         peer_in_most_need = function() {
@@ -175,20 +188,48 @@ ruleset gossip {
     rule send_new_self_reading {
         select when gossip new_self_reading
         pre {
-            new_temp = temperature_store:temperatures().head()
-            message = {
+            //////////////////////////
+            // Temperature
+            //////////////////////////
+            new_temp = temperature_store:temperatures().head()        
+            temp_message = {
                 "MessageID": ent:gossip_id + ":" + ent:temp_sequence_number,
                 "SensorID": ent:gossip_id,
                 "Temperature": new_temp{"temperature"},
                 "Timestamp": new_temp{"timestamp"},
                 "type": "temp"
             }
+
+            //////////////////////////
+            // Threshold
+            //////////////////////////
+            increment = get_counter_increment(new_temp)
+            is_violating_threshold = 
+                increment == 0 =>
+                    ent:is_violating_threshold |
+                    not ent:is_violating_threshold    
+            threshold_message = {
+                "MessageID": ent:gossip_id + ":" + ent:temp_sequence_number,
+                "SensorID": ent:gossip_id,
+                "counter_increment": increment,
+                "type": "threshold"
+            }
         }
         send_directive("New reading detected")
         always {
-            raise gossip event "rumor" attributes message
+            ///////////////////
+            // Temperature
+            ///////////////////
+            raise gossip event "rumor" attributes temp_message
             ent:temp_sequence_number := ent:temp_sequence_number + 1
             ent:last_temp := new_temp
+
+            ///////////////////
+            // Threshold
+            ///////////////////
+            raise gossip event "rumor" attributes threshold_message
+            ent:threshold_sequence_number := ent:threshold_sequence_number + 1
+            ent:is_violating_threshold := is_violating_threshold
         }
     }
 
@@ -608,6 +649,7 @@ ruleset gossip {
             ent:threshold_summaries{ent:gossip_id} := {}
             ent:threshold_summaries{[ent:gossip_id, ent:gossip_id]} := -1
             ent:threshold_counter := 0
+            ent:is_violating_threshold := false
 
             /////////////////////////
             // Other Variables

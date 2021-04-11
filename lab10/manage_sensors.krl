@@ -17,7 +17,7 @@ ruleset manage_sensors {
                 ctx:query(sensor_vals{"eci"}, "temperature_store", "temperatures")
             })
         }
-        default_threshold = 90
+        default_threshold = 74
         sms_number = "+19519708437"
 
         //////////////////////////
